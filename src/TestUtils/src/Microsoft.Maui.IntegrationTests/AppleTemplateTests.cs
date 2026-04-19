@@ -24,6 +24,15 @@ namespace Microsoft.Maui.IntegrationTests
 			{
 				TestSimulator.Shutdown();
 				TestSimulator.Launch();
+				// Wait for simulator to fully boot to avoid race condition where
+				// simulator reports "booted" but is still in Booting state internally
+				// This prevents "Unable to lookup in current state: Booting" errors
+				if (!TestSimulator.WaitForBootComplete())
+				{
+					throw new InvalidOperationException(
+						$"Simulator failed to fully boot within timeout. " +
+						$"Target: {TestSimulator.XHarnessID}, UDID: {TestSimulator.GetUDID()}");
+				}
 			}
 		}
 
@@ -100,7 +109,7 @@ namespace Microsoft.Maui.IntegrationTests
 			var projectDir = TestDirectory;
 			var projectFile = Path.Combine(projectDir, $"{Path.GetFileName(projectDir)}.csproj");
 
-			Assert.True(DotnetInternal.New(id, projectDir, framework),
+			Assert.True(DotnetInternal.New(id, projectDir, framework, output: _output),
 				$"Unable to create template {id}. Check test output for errors.");
 
 			var buildProps = BuildProps;
@@ -126,7 +135,7 @@ namespace Microsoft.Maui.IntegrationTests
 				buildProps.Add("TrimmerSingleWarn=false"); // Disable trimmer warnings for iOS full trimming builds due to ObjCRuntime issues
 			}
 
-			Assert.True(DotnetInternal.Build(projectFile, config, framework: $"{framework}-ios", properties: buildProps, runtimeIdentifier: runtimeIdentifier),
+			Assert.True(DotnetInternal.Build(projectFile, config, framework: $"{framework}-ios", properties: buildProps, runtimeIdentifier: runtimeIdentifier, output: _output),
 				$"Project {Path.GetFileName(projectFile)} failed to build. Check test output/attachments for errors.");
 
 			// Find the .app bundle - it may be in the bin folder with or without a RID subfolder depending on build settings
@@ -142,7 +151,7 @@ namespace Microsoft.Maui.IntegrationTests
 			// Let XHarness find the simulator based on target (e.g., ios-simulator-64_18.5).
 			// Don't pass a specific UDID - this gives XHarness full control over the simulator
 			// lifecycle and avoids race conditions with watchdog disabling.
-			Assert.True(XHarness.RunAppleForTimeout(appFile, xhResultsDir, _simulatorFixture.TestSimulator.XHarnessID),
+			Assert.True(XHarness.RunAppleForTimeout(appFile, xhResultsDir, _simulatorFixture.TestSimulator.XHarnessID, output: _output),
 				$"Project {Path.GetFileName(projectFile)} failed to run. Check test output/attachments for errors.");
 		}
 	}
