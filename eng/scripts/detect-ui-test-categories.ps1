@@ -18,6 +18,31 @@ if ([string]::IsNullOrWhiteSpace($TargetBranch)) {
     $TargetBranch = $env:SYSTEM_PULLREQUEST_TARGETBRANCH
 }
 
+# Escape hatch: PR label "run-all-uitests" forces the full category matrix to run.
+$prNumber = $env:SYSTEM_PULLREQUEST_PULLREQUESTNUMBER
+$repoName = $env:BUILD_REPOSITORY_NAME
+if (-not [string]::IsNullOrWhiteSpace($prNumber) -and -not [string]::IsNullOrWhiteSpace($repoName)) {
+    try {
+        $labelsUrl = "https://api.github.com/repos/$repoName/issues/$prNumber/labels"
+        Write-Host "Checking PR labels at $labelsUrl" -ForegroundColor Cyan
+        $headers = @{ 'User-Agent' = 'maui-ui-test-detector' }
+        if (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+            $headers['Authorization'] = "Bearer $env:GH_TOKEN"
+        } elseif (-not [string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
+            $headers['Authorization'] = "Bearer $env:SYSTEM_ACCESSTOKEN"
+        }
+        $labels = Invoke-RestMethod -Uri $labelsUrl -Headers $headers -Method Get -TimeoutSec 30
+        $labelNames = @($labels | ForEach-Object { $_.name })
+        Write-Host "PR labels: $([string]::Join(', ', $labelNames))" -ForegroundColor Cyan
+        if ($labelNames -contains 'run-all-uitests') {
+            Write-Host "##[section]Label 'run-all-uitests' present. Running ALL UI test categories (detection bypassed)." -ForegroundColor Yellow
+            return
+        }
+    } catch {
+        Write-Host "##[warning]Failed to query PR labels: $($_.Exception.Message). Continuing with category detection."
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($TargetBranch)) {
     Write-Host "##[warning]Unable to determine target branch for comparison."
     Write-Host "##[section]FALLBACK: All UI test categories will run for this PR."
