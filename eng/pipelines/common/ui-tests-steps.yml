@@ -26,9 +26,12 @@ steps:
     $detectedCategories = $env:DETECTED_CATEGORIES
     # Engage filtering whenever discovery actually emitted detected categories.
     # That happens for real PR builds AND for manual queues that pass -PrNumber.
-    # Treat the literal placeholder '$(DETECTED_CATEGORIES)' as "not set" — it
-    # appears when no upstream stage produced the variable.
-    $detectedCategoriesSet = -not [string]::IsNullOrWhiteSpace($detectedCategories) -and $detectedCategories -ne '$(DETECTED_CATEGORIES)'
+    # When no upstream stage produced the variable, AzDO leaves the literal
+    # placeholder '$(DETECTED_CATEGORIES)' in the env value — detect that via
+    # StartsWith. We can't compare against the literal placeholder in a
+    # single-quoted string here because AzDO pre-expands $(...) macros in the
+    # entire script body before pwsh runs.
+    $detectedCategoriesSet = -not [string]::IsNullOrWhiteSpace($detectedCategories) -and -not $detectedCategories.StartsWith('$(')
     $isPR = $env:BUILD_REASON -eq "PullRequest"
     $shouldFilter = $isPR -or $detectedCategoriesSet
 
