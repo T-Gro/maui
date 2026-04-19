@@ -484,12 +484,14 @@ namespace Microsoft.Maui.Platform
 
         void OnDrawerOpened(object? sender, DrawerOpenedEventArgs e)
         {
-            OnPresentedChanged?.Invoke(true);
+            // OnPresentedChanged is fired from OnDrawerStateChanged(StateIdle) only,
+            // to avoid double-firing (DrawerOpened + StateIdle both fire for the same transition).
         }
 
         void OnDrawerClosed(object? sender, DrawerClosedEventArgs e)
         {
-            OnPresentedChanged?.Invoke(false);
+            // OnPresentedChanged is fired from OnDrawerStateChanged(StateIdle) only,
+            // to avoid double-firing (DrawerClosed + StateIdle both fire for the same transition).
         }
 
         void OnDrawerSlide(object? sender, DrawerSlideEventArgs e)

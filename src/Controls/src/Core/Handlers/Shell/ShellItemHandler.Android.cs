@@ -717,6 +717,13 @@ namespace Microsoft.Maui.Controls.Handlers
                 _viewPager.OffscreenPageLimit = Math.Max(shellSections.Count, 1);
                 _adapter.UpdateSections(shellSections);
             }
+            else if (_adapter is null && _viewPager is not null)
+            {
+                // 0→N transition: adapter/manager were not created during initial setup
+                // because there were no sections. Now that sections exist, create them.
+                SetupViewPagerAdapter();
+                SetupTabbedViewManager();
+            }
 
             // Rebuild the bottom navigation menu for the updated sections via TabbedViewManager
             _tabbedViewManager?.RefreshTabs();
@@ -1379,7 +1386,11 @@ namespace Microsoft.Maui.Controls.Handlers
             foreach (var section in toRemove)
                 _sectionIds.Remove(section);
 
-            // Clear position-based renderers (positions may differ for new sections)
+            // Dispose position-based renderers before clearing (IShellSectionRenderer : IDisposable)
+            foreach (var renderer in _renderers.Values)
+            {
+                renderer.Dispose();
+            }
             _renderers.Clear();
 
             _sections = newSections;
