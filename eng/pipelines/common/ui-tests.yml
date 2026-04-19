@@ -71,10 +71,13 @@ stages:
           - task: PowerShell@2
             name: DetectCategories
             displayName: Determine UI test categories for PRs
+            env:
+              SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
+              MANUAL_PR_NUMBER: ${{ parameters.prNumber }}
             inputs:
               pwsh: true
               filePath: $(System.DefaultWorkingDirectory)/eng/scripts/detect-ui-test-categories.ps1
-              arguments: '-TargetBranch "$(System.PullRequest.TargetBranch)" -PrNumber "${{ parameters.prNumber }}"'
+              arguments: '-TargetBranch "$env:SYSTEM_PULLREQUEST_TARGETBRANCH" -PrNumber "$env:MANUAL_PR_NUMBER"'
 
   - stage: build_ui_tests
     displayName: Build UITests Sample App
