@@ -24,13 +24,19 @@ steps:
     $testFilterParam = $env:CATEGORY_GROUP
     $testFilterFallback = $env:TEST_FILTER_PARAM
     $detectedCategories = $env:DETECTED_CATEGORIES
+    # Engage filtering whenever discovery actually emitted detected categories.
+    # That happens for real PR builds AND for manual queues that pass -PrNumber.
+    # Treat the literal placeholder '$(DETECTED_CATEGORIES)' as "not set" — it
+    # appears when no upstream stage produced the variable.
+    $detectedCategoriesSet = -not [string]::IsNullOrWhiteSpace($detectedCategories) -and $detectedCategories -ne '$(DETECTED_CATEGORIES)'
     $isPR = $env:BUILD_REASON -eq "PullRequest"
-    
+    $shouldFilter = $isPR -or $detectedCategoriesSet
+
     Write-Host "=== Early Category Check ==="
     Write-Host "Build Reason: $env:BUILD_REASON"
     Write-Host "Category Group (from matrix): '$testFilterParam'"
     Write-Host "Test Filter (from parameter): '$testFilterFallback'"
-    Write-Host "Detected Categories: '$detectedCategories'"
+    Write-Host "Detected Categories: '$detectedCategories' (filter engaged: $shouldFilter)"
     
     # Use testFilter parameter as fallback when CATEGORYGROUP is not set or not expanded
     # When CATEGORYGROUP variable doesn't exist, it shows as literal '$(CATEGORYGROUP)'
@@ -43,8 +49,8 @@ steps:
     $shouldRun = $true
     $matchingCategoriesResult = $testFilterParam  # Default: use all categories from this group
     
-    # For PRs with detected categories, check if this category group has any matches
-    if ($isPR -and -not [string]::IsNullOrWhiteSpace($detectedCategories) -and -not [string]::IsNullOrWhiteSpace($testFilterParam)) {
+    # For builds with detected categories, check if this category group has any matches
+    if ($shouldFilter -and $detectedCategoriesSet -and -not [string]::IsNullOrWhiteSpace($testFilterParam)) {
         $categoryList = $testFilterParam -split ","
         $detectedList = $detectedCategories -split ","
         $matchingCategories = @()
