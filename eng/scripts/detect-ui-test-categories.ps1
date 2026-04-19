@@ -57,7 +57,7 @@ if ([string]::IsNullOrWhiteSpace($diff)) {
     return
 }
 
-$categoryPattern = '^[+]{1}\s*\[Category\((?<value>[^\)]*)\)\]'
+$categoryPattern = '^\+\s*\[Category\((?<value>[^\)]*)\)\]'
 $addedCategories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
 foreach ($line in $diff -split "`n") {
