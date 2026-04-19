@@ -14,6 +14,7 @@ parameters:
   skipProvisioning: true
   BuildNativeAOT: false # Parameter to control whether NativeAOT artifacts should be built
   RunNativeAOT: false # Parameter to control whether NativeAOT UI tests should run
+  prNumber: ' ' # Optional: PR number for testing category detection from a manual queue
   categoryGroupsToTest:
     # Make sure that this list is always up-to-date with src/Controls/tests/TestCases.Shared.Tests/UITestCategories.cs
     # we might want to improve this somehow depending on how much the categories change over time
@@ -54,7 +55,11 @@ parameters:
 stages:
   - stage: discover_ui_test_categories
     displayName: Discover UI Test Categories
-    condition: eq(variables['Build.Reason'], 'PullRequest')
+    condition: |
+      or(
+        eq(variables['Build.Reason'], 'PullRequest'),
+        ne(trim('${{ parameters.prNumber }}'), '')
+      )
     jobs:
       - job: detect
         displayName: Detect category filters
@@ -69,7 +74,7 @@ stages:
             inputs:
               pwsh: true
               filePath: $(System.DefaultWorkingDirectory)/eng/scripts/detect-ui-test-categories.ps1
-              arguments: '-TargetBranch "$(System.PullRequest.TargetBranch)"'
+              arguments: '-TargetBranch "$(System.PullRequest.TargetBranch)" -PrNumber "${{ parameters.prNumber }}"'
 
   - stage: build_ui_tests
     displayName: Build UITests Sample App

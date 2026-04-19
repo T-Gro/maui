@@ -1,16 +1,26 @@
 [CmdletBinding()]
 param(
     [string]$TargetBranch,
+    [string]$PrNumber,
     [string]$TestRoot = "src/Controls/tests/TestCases.Shared.Tests"
 )
+
+# Normalize PrNumber: strip whitespace; AzDO often passes a placeholder space when the parameter is unset.
+if (-not [string]::IsNullOrWhiteSpace($PrNumber)) {
+    $PrNumber = $PrNumber.Trim()
+} else {
+    $PrNumber = $null
+}
 
 $buildReason = $env:BUILD_REASON
 if ([string]::IsNullOrWhiteSpace($buildReason)) {
     $buildReason = $env:SYSTEM_REASON
 }
 
-if ($buildReason -ne 'PullRequest') {
-    Write-Host "Build reason '$buildReason' is not PullRequest. Skipping category detection." -ForegroundColor Cyan
+$isManualPrTest = -not [string]::IsNullOrWhiteSpace($PrNumber)
+
+if ($buildReason -ne 'PullRequest' -and -not $isManualPrTest) {
+    Write-Host "Build reason '$buildReason' is not PullRequest and no -PrNumber override was provided. Skipping category detection." -ForegroundColor Cyan
     return
 }
 
@@ -18,20 +28,64 @@ if ([string]::IsNullOrWhiteSpace($TargetBranch)) {
     $TargetBranch = $env:SYSTEM_PULLREQUEST_TARGETBRANCH
 }
 
-# Escape hatch: PR label "run-all-uitests" forces the full category matrix to run.
-$prNumber = $env:SYSTEM_PULLREQUEST_PULLREQUESTNUMBER
+# Determine the PR number for label / API lookups.
+$prNumberForLookup = $env:SYSTEM_PULLREQUEST_PULLREQUESTNUMBER
+if ([string]::IsNullOrWhiteSpace($prNumberForLookup) -and $isManualPrTest) {
+    $prNumberForLookup = $PrNumber
+}
 $repoName = $env:BUILD_REPOSITORY_NAME
-if (-not [string]::IsNullOrWhiteSpace($prNumber) -and -not [string]::IsNullOrWhiteSpace($repoName)) {
+if ([string]::IsNullOrWhiteSpace($repoName)) {
+    $repoName = 'dotnet/maui'
+}
+
+# Helper: build authenticated GitHub API headers.
+function Get-GitHubHeaders {
+    $h = @{ 'User-Agent' = 'maui-ui-test-detector' }
+    if (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
+        $h['Authorization'] = "Bearer $env:GH_TOKEN"
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
+        $h['Authorization'] = "Bearer $env:SYSTEM_ACCESSTOKEN"
+    }
+    return $h
+}
+
+# Manual-test override: when -PrNumber is provided, fetch the PR's base/head from GitHub
+# and replay the same diff that a normal PR build would see.
+if ($isManualPrTest) {
     try {
-        $labelsUrl = "https://api.github.com/repos/$repoName/issues/$prNumber/labels"
+        $prUrl = "https://api.github.com/repos/$repoName/pulls/$PrNumber"
+        Write-Host "##[section]Manual PR test mode (PrNumber=$PrNumber). Fetching PR metadata from $prUrl" -ForegroundColor Yellow
+        $pr = Invoke-RestMethod -Uri $prUrl -Headers (Get-GitHubHeaders) -Method Get -TimeoutSec 30
+        $TargetBranch = $pr.base.ref
+        $headRef = $pr.head.ref
+        $headSha = $pr.head.sha
+        $baseRepoCloneUrl = $pr.base.repo.clone_url
+        $headRepoCloneUrl = $pr.head.repo.clone_url
+        Write-Host "PR #$PrNumber : $($pr.head.repo.full_name)/$headRef ($headSha) -> $($pr.base.repo.full_name)/$TargetBranch" -ForegroundColor Cyan
+
+        # Fetch base branch from the base repo.
+        git remote remove _detect_base 2>$null | Out-Null
+        git remote add _detect_base $baseRepoCloneUrl
+        git fetch _detect_base "$TargetBranch" --no-tags --prune --depth=200 | Out-Null
+        git update-ref refs/remotes/origin/$TargetBranch _detect_base/$TargetBranch | Out-Null
+
+        # Fetch head commit (works for forks too) and check it out so the diff reflects the PR changes.
+        git remote remove _detect_head 2>$null | Out-Null
+        git remote add _detect_head $headRepoCloneUrl
+        git fetch _detect_head "$headSha" --no-tags --depth=200 | Out-Null
+        git checkout --quiet $headSha | Out-Null
+    } catch {
+        Write-Host "##[warning]Manual PR test setup failed: $($_.Exception.Message). Falling back to running ALL categories."
+        return
+    }
+}
+
+# Escape hatch: PR label "run-all-uitests" forces the full category matrix to run.
+if (-not [string]::IsNullOrWhiteSpace($prNumberForLookup)) {
+    try {
+        $labelsUrl = "https://api.github.com/repos/$repoName/issues/$prNumberForLookup/labels"
         Write-Host "Checking PR labels at $labelsUrl" -ForegroundColor Cyan
-        $headers = @{ 'User-Agent' = 'maui-ui-test-detector' }
-        if (-not [string]::IsNullOrWhiteSpace($env:GH_TOKEN)) {
-            $headers['Authorization'] = "Bearer $env:GH_TOKEN"
-        } elseif (-not [string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
-            $headers['Authorization'] = "Bearer $env:SYSTEM_ACCESSTOKEN"
-        }
-        $labels = Invoke-RestMethod -Uri $labelsUrl -Headers $headers -Method Get -TimeoutSec 30
+        $labels = Invoke-RestMethod -Uri $labelsUrl -Headers (Get-GitHubHeaders) -Method Get -TimeoutSec 30
         $labelNames = @($labels | ForEach-Object { $_.name })
         Write-Host "PR labels: $([string]::Join(', ', $labelNames))" -ForegroundColor Cyan
         if ($labelNames -contains 'run-all-uitests') {
