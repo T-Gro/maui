@@ -1,13 +1,13 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Posts or updates a UI test category-detection summary comment on a PR.
+    Posts UI test results summary on a PR after maui-pr-uitests pipeline completes.
 
 .DESCRIPTION
     Maintains ONE comment per PR identified by <!-- UI Test Categories -->.
-    Reads an Azure DevOps build, finds the discover stage and every per-job
-    "Check if category should run" task, then summarises what the detection
-    decided and which matrix cells the pipeline skipped.
+    Fetches test run results from AzDO, groups failures by error pattern,
+    classifies them as snapshot/timeout/crash/assertion, and provides
+    actionable information for maintainers.
 
     Each invocation adds an expandable session keyed by the PR HEAD SHA.
     - Same SHA  -> replaces that session in-place.
@@ -32,10 +32,10 @@
     Print the comment instead of posting.
 
 .EXAMPLE
-    ./post-uitest-categories-comment.ps1 -PRNumber 33176 -BuildId 1386279
+    ./post-uitest-categories-comment.ps1 -PRNumber 35015 -BuildId 1386834
 
 .EXAMPLE
-    ./post-uitest-categories-comment.ps1 -PRNumber 33176 -BuildId 1386279 -DryRun
+    ./post-uitest-categories-comment.ps1 -PRNumber 35015 -BuildId 1386834 -DryRun
 #>
 
 param(
@@ -64,6 +64,31 @@ $BuildUrl = "https://dev.azure.com/$AzdoOrg/$AzdoProject/_build/results?buildId=
 $ApiBase = "https://dev.azure.com/$AzdoOrg/$AzdoProject/_apis/build/builds/$BuildId"
 
 # ============================================================================
+# HELPER: classify a test failure
+# ============================================================================
+
+function Get-FailureType {
+    param([string]$ErrorMsg)
+    if ([string]::IsNullOrWhiteSpace($ErrorMsg)) { return "unknown" }
+    if ($ErrorMsg -match 'Snapshot different|VisualTestFailedException|difference\)') { return "snapshot" }
+    if ($ErrorMsg -match 'Timeout|timed out|TimeoutException') { return "timeout" }
+    if ($ErrorMsg -match 'NullReferenceException|ObjectDisposedException|crashed|SIGABRT|SIGSEGV') { return "crash" }
+    if ($ErrorMsg -match 'Assert\.|Expected|actual|Is\.EqualTo|Is\.Not') { return "assertion" }
+    return "other"
+}
+
+function Get-FailureIcon {
+    param([string]$Type)
+    switch ($Type) {
+        "snapshot"  { return "🖼️" }
+        "timeout"   { return "⏱️" }
+        "crash"     { return "💥" }
+        "assertion" { return "❌" }
+        default     { return "❓" }
+    }
+}
+
+# ============================================================================
 # FETCH BUILD + TIMELINE
 # ============================================================================
 
@@ -72,89 +97,152 @@ $build = Invoke-RestMethod -Uri "$ApiBase`?api-version=7.1"
 $timeline = Invoke-RestMethod -Uri "$ApiBase/timeline?api-version=7.1"
 
 # ----------------------------------------------------------------------------
-# Detected categories — read from any "Check if category should run" log
-# (every job logs the same DETECTED_CATEGORIES value).
+# Detected categories (from "Check if category should run" logs)
 # ----------------------------------------------------------------------------
 
 $checkRecords = @($timeline.records |
     Where-Object { $_.name -eq "Check if category should run" -and $_.log -and $_.log.id })
 
-if ($checkRecords.Count -eq 0) {
-    throw "Build $BuildId has no 'Check if category should run' tasks — wrong build?"
-}
-
 $detectedCategories = $null
 $filterEngaged = $false
+$ranCount = 0
+$totalCount = 0
 
-foreach ($rec in $checkRecords) {
-    $log = Invoke-RestMethod -Uri "$ApiBase/logs/$($rec.log.id)?api-version=7.1"
-    if ($log -match "Detected Categories:\s*'([^']*)'\s*\(filter engaged:\s*(True|False)\)") {
-        $val = $Matches[1]
-        $eng = $Matches[2] -eq "True"
-        if (-not $val.StartsWith('$(')) {
-            $detectedCategories = $val
-            $filterEngaged = $eng
-            break
+if ($checkRecords.Count -gt 0) {
+    foreach ($rec in $checkRecords) {
+        $log = Invoke-RestMethod -Uri "$ApiBase/logs/$($rec.log.id)?api-version=7.1"
+        if ($log -match "Detected Categories:\s*'([^']*)'\s*\(filter engaged:\s*(True|False)\)") {
+            $val = $Matches[1]
+            $eng = $Matches[2] -eq "True"
+            if (-not $val.StartsWith('$(')) {
+                $detectedCategories = $val
+                $filterEngaged = $eng
+                break
+            }
         }
+    }
+    # Count ran vs skipped
+    foreach ($rec in $checkRecords) {
+        $totalCount++
+        $log = Invoke-RestMethod -Uri "$ApiBase/logs/$($rec.log.id)?api-version=7.1"
+        if ($log -match "Should run tests:\s*True") { $ranCount++ }
     }
 }
 
 if ([string]::IsNullOrWhiteSpace($detectedCategories)) {
-    $detectedCategories = "(none — full matrix will run)"
+    $detectedCategories = "all (full matrix)"
 }
+$skippedCount = $totalCount - $ranCount
 
 Write-Host "Detected categories: $detectedCategories" -ForegroundColor Green
 Write-Host "Filter engaged: $filterEngaged" -ForegroundColor Green
 
-# ----------------------------------------------------------------------------
-# Per-job decisions — parse every check log
-# ----------------------------------------------------------------------------
+# ============================================================================
+# FETCH TEST RESULTS (requires az auth)
+# ============================================================================
 
-$decisions = @()
-foreach ($rec in $checkRecords) {
-    $log = Invoke-RestMethod -Uri "$ApiBase/logs/$($rec.log.id)?api-version=7.1"
-    $group = if ($log -match "Category Group \(from matrix\):\s*'([^']*)'") { $Matches[1] } else { "?" }
-    $shouldRun = if ($log -match "Should run tests:\s*(True|False)") { $Matches[1] -eq "True" } else { $true }
-    $matched = if ($log -match "Matching categories for this job:\s*(.+)") { $Matches[1].Trim() } else { "" }
+$allRuns = @()
+$testApiToken = $null
+try {
+    $testApiToken = (az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv 2>$null)
+} catch { }
 
-    # Walk up to find the parent job/stage name for context
-    $parent = $timeline.records | Where-Object { $_.id -eq $rec.parentId } | Select-Object -First 1
-    $stageName = $parent.name
-    if ($parent -and $parent.parentId) {
-        $grandparent = $timeline.records | Where-Object { $_.id -eq $parent.parentId } | Select-Object -First 1
-        if ($grandparent) { $stageName = $grandparent.name }
+if (-not [string]::IsNullOrWhiteSpace($testApiToken)) {
+    Write-Host "Fetching test results..." -ForegroundColor Cyan
+    $headers = @{ Authorization = "Bearer $testApiToken" }
+    $buildUri = "vstfs:///Build/Build/$BuildId"
+    try {
+        $runsResp = Invoke-RestMethod -Headers $headers -Uri "https://dev.azure.com/$AzdoOrg/$AzdoProject/_apis/test/runs?buildUri=$buildUri&api-version=7.1"
+        foreach ($run in $runsResp.value) {
+            if ($run.totalTests -eq 0) { continue }
+            $failedTests = @()
+            if ($run.passedTests -lt $run.totalTests) {
+                try {
+                    $failedResp = Invoke-RestMethod -Headers $headers `
+                        -Uri "https://dev.azure.com/$AzdoOrg/$AzdoProject/_apis/test/Runs/$($run.id)/results?outcomes=Failed&`$top=200&api-version=7.1"
+                    $failedTests = @($failedResp.value)
+                } catch { }
+            }
+            $allRuns += [pscustomobject]@{
+                Name        = $run.name
+                Total       = $run.totalTests
+                Passed      = $run.passedTests
+                FailedCount = $failedTests.Count
+                FailedTests = $failedTests
+            }
+        }
+    } catch {
+        Write-Host "⚠️ Could not fetch test results: $_" -ForegroundColor Yellow
     }
+} else {
+    Write-Host "⚠️ No az token — test details unavailable (public org requires auth for test API)" -ForegroundColor Yellow
+}
 
-    $decisions += [pscustomobject]@{
-        Stage     = $stageName
-        Group     = $group
-        ShouldRun = $shouldRun
-        Matched   = $matched
+# ============================================================================
+# CLASSIFY AND GROUP FAILURES
+# ============================================================================
+
+$totalTests = ($allRuns | Measure-Object -Property Total -Sum).Sum
+$totalPassed = ($allRuns | Measure-Object -Property Passed -Sum).Sum
+$totalFailed = ($allRuns | Measure-Object -Property FailedCount -Sum).Sum
+
+$failedRuns = @($allRuns | Where-Object { $_.FailedCount -gt 0 })
+$passedRuns = @($allRuns | Where-Object { $_.FailedCount -eq 0 -and $_.Total -gt 0 })
+
+# Build a flat list of all failures with classification
+$allFailures = @()
+foreach ($run in $failedRuns) {
+    # Parse platform from run name (e.g., _ios_ui_tests_mono_controls_latest -> iOS Mono latest)
+    $platform = $run.Name -replace '^_', '' -replace '_ui_tests_', ' ' -replace '_controls_', ' ' -replace '_', ' '
+    foreach ($t in $run.FailedTests) {
+        $errRaw = if ($t.errorMessage) { $t.errorMessage } else { '' }
+        $errOneLine = ($errRaw -replace '\r?\n', ' ' -replace '\s+', ' ').Trim()
+        $ftype = Get-FailureType -ErrorMsg $errOneLine
+
+        # Extract key detail based on type
+        $detail = switch ($ftype) {
+            "snapshot" {
+                if ($errOneLine -match '(\d+\.\d+)%\s*difference') { "$($Matches[1])% diff" }
+                else { "snapshot mismatch" }
+            }
+            "timeout" { "timed out" }
+            "crash" {
+                if ($errOneLine -match '(NullReferenceException|ObjectDisposedException|SIGABRT|SIGSEGV)') { $Matches[1] }
+                else { "crash" }
+            }
+            "assertion" {
+                if ($errOneLine.Length -gt 120) { $errOneLine.Substring(0, 120) + "..." }
+                else { $errOneLine }
+            }
+            default {
+                if ($errOneLine.Length -gt 120) { $errOneLine.Substring(0, 120) + "..." }
+                else { $errOneLine }
+            }
+        }
+
+        $allFailures += [pscustomobject]@{
+            TestName = $t.testCase.name
+            RunName  = $run.Name
+            Platform = $platform
+            Type     = $ftype
+            Detail   = $detail
+            Error    = if ($errOneLine.Length -gt 300) { $errOneLine.Substring(0, 300) + "..." } else { $errOneLine }
+        }
     }
 }
 
-$ranDecisions     = @($decisions | Where-Object { $_.ShouldRun })
-$skippedDecisions = @($decisions | Where-Object { -not $_.ShouldRun })
+# Group by failure type
+$failuresByType = $allFailures | Group-Object -Property Type | Sort-Object Count -Descending
 
-Write-Host "Jobs ran: $($ranDecisions.Count) / Skipped: $($skippedDecisions.Count)" -ForegroundColor Green
+Write-Host "Total: $totalTests tests, $totalPassed passed, $totalFailed failed across $($allRuns.Count) runs" -ForegroundColor $(if ($totalFailed -gt 0) { "Yellow" } else { "Green" })
 
-# ----------------------------------------------------------------------------
-# Stage results
-# ----------------------------------------------------------------------------
+# ============================================================================
+# STAGE RESULTS (only failed/issues stages)
+# ============================================================================
 
-$stageRows = @($timeline.records |
-    Where-Object { $_.type -eq "Stage" } |
-    Sort-Object name -Unique |
-    ForEach-Object {
-        $icon = switch ($_.result) {
-            "succeeded"            { "✅" }
-            "succeededWithIssues"  { "⚠️" }
-            "failed"               { "❌" }
-            "canceled"             { "🚫" }
-            default                { "⏸️" }
-        }
-        "| $icon | $($_.name) | $($_.result) |"
-    })
+$stages = @($timeline.records | Where-Object { $_.type -eq "Stage" } | Sort-Object name -Unique)
+$failedStages = @($stages | Where-Object { $_.result -eq "failed" -or $_.result -eq "canceled" })
+$passedStages = @($stages | Where-Object { $_.result -eq "succeeded" -or $_.result -eq "succeededWithIssues" })
 
 # ============================================================================
 # FETCH PR METADATA
@@ -177,45 +265,105 @@ try { $prAuthor = gh api "repos/$Repo/pulls/$PRNumber" --jq '.user.login' 2>$nul
 $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm UTC")
 
 # ============================================================================
-# BUILD SESSION BLOCK
+# BUILD COMMENT
 # ============================================================================
 
-$summaryLine = if ($filterEngaged) {
-    "🎯 Filter engaged — **$($ranDecisions.Count) of $($decisions.Count)** matrix cells ran (skipped **$($skippedDecisions.Count)**)."
-} else {
-    "📦 Filter not engaged — full matrix ran."
-}
-
-$ranTable = if ($ranDecisions.Count -gt 0) {
-    @(
-        "| Stage | Category Group | Matched |"
-        "|---|---|---|"
-        ($ranDecisions | ForEach-Object { "| $($_.Stage) | ``$($_.Group)`` | ``$(if ($_.Matched) { $_.Matched } else { $_.Group })`` |" })
-    ) -join "`n"
-} else { "_No jobs ran._" }
-
-$skippedTable = if ($skippedDecisions.Count -gt 0) {
-    @(
-        "| Stage | Category Group |"
-        "|---|---|"
-        ($skippedDecisions | ForEach-Object { "| $($_.Stage) | ``$($_.Group)`` |" })
-    ) -join "`n"
-} else { "_No jobs were skipped._" }
-
-$stageTable = if ($stageRows.Count -gt 0) {
-    @(
-        "| | Stage | Result |"
-        "|---|---|---|"
-        ($stageRows -join "`n")
-    ) -join "`n"
-} else { "_No stages found._" }
-
 $buildBadge = switch ($build.result) {
-    "succeeded"           { "✅ succeeded" }
-    "succeededWithIssues" { "⚠️ succeeded with issues" }
+    "succeeded"           { "✅ passed" }
+    "succeededWithIssues" { "⚠️ passed with issues" }
     "failed"              { "❌ failed" }
     "canceled"            { "🚫 canceled" }
     default               { "🔄 $($build.status)" }
+}
+
+$passRate = if ($totalTests -gt 0) { [math]::Round(($totalPassed / $totalTests) * 100, 1) } else { 0 }
+
+# Header line with key stats
+$headerLine = "**$buildBadge** | $totalPassed/$totalTests passed ($passRate%)"
+if ($totalFailed -gt 0) { $headerLine += " | **$totalFailed failed**" }
+
+# Filter info line
+$filterLine = if ($filterEngaged) {
+    "🎯 **Detected categories:** ``$detectedCategories`` — ran $ranCount of $totalCount matrix cells (skipped $skippedCount)"
+} else {
+    "📦 **Full matrix** — all $totalCount matrix cells ran"
+}
+
+# --- Failed tests section (the main content) ---
+$failedSection = ""
+if ($totalFailed -gt 0) {
+    $parts = @()
+
+    # Summary by failure type
+    $parts += "### Failed Tests ($totalFailed)"
+    $parts += ""
+    $typeSummary = @($failuresByType | ForEach-Object {
+        $icon = Get-FailureIcon -Type $_.Name
+        "$icon **$($_.Name)**: $($_.Count)"
+    })
+    $parts += ($typeSummary -join " | ")
+    $parts += ""
+
+    # Per-run breakdown with actual test names
+    foreach ($run in ($failedRuns | Sort-Object FailedCount -Descending)) {
+        $runPlatform = $run.Name -replace '^_', '' -replace '_ui_tests_', ' | ' -replace '_controls_', ' | ' -replace '_', ' '
+        $passedPct = if ($run.Total -gt 0) { [math]::Round(($run.Passed / $run.Total) * 100, 0) } else { 0 }
+
+        $parts += "<details>"
+        $parts += "<summary><strong>$runPlatform</strong> — $($run.FailedCount) failed, $($run.Passed)/$($run.Total) passed ($passedPct%)</summary>"
+        $parts += ""
+        $parts += "| | Test | Detail |"
+        $parts += "|---|---|---|"
+
+        $runFailures = @($allFailures | Where-Object { $_.RunName -eq $run.Name } | Sort-Object Type, TestName)
+        foreach ($f in $runFailures) {
+            $icon = Get-FailureIcon -Type $f.Type
+            $name = $f.TestName -replace '\|', '\|'
+            $det = $f.Detail -replace '\|', '\|' -replace '`', "'"
+            if ($det.Length -gt 150) { $det = $det.Substring(0, 150) + "..." }
+            $parts += "| $icon | ``$name`` | $det |"
+        }
+        $parts += ""
+        $parts += "</details>"
+        $parts += ""
+    }
+
+    $failedSection = $parts -join "`n"
+} else {
+    $failedSection = "### All Tests Passed ✅`n`nNo failures detected across $($allRuns.Count) test runs."
+}
+
+# --- Passed runs summary ---
+$passedSection = ""
+if ($passedRuns.Count -gt 0) {
+    $passedLines = @()
+    $passedLines += "<details>"
+    $passedLines += "<summary>✅ <strong>Passed runs ($($passedRuns.Count))</strong> — $(($passedRuns | Measure-Object -Property Total -Sum).Sum) tests</summary>"
+    $passedLines += ""
+    $passedLines += "| Run | Tests |"
+    $passedLines += "|---|---|"
+    foreach ($r in ($passedRuns | Sort-Object Name)) {
+        $name = $r.Name -replace '^_', '' -replace '_ui_tests_', ' | ' -replace '_controls_', ' | ' -replace '_', ' '
+        $passedLines += "| $name | $($r.Total) |"
+    }
+    $passedLines += ""
+    $passedLines += "</details>"
+    $passedSection = $passedLines -join "`n"
+}
+
+# --- Failed stages (compact) ---
+$stageSection = ""
+if ($failedStages.Count -gt 0) {
+    $stageLines = @()
+    $stageLines += "<details>"
+    $stageLines += "<summary>🔴 <strong>Failed stages ($($failedStages.Count))</strong> of $($stages.Count) total</summary>"
+    $stageLines += ""
+    foreach ($s in $failedStages) {
+        $stageLines += "- ❌ $($s.name)"
+    }
+    $stageLines += ""
+    $stageLines += "</details>"
+    $stageSection = $stageLines -join "`n"
 }
 
 $sessionStart = "<!-- SESSION:$commitSha7 START -->"
@@ -224,32 +372,17 @@ $sessionEnd   = "<!-- SESSION:$commitSha7 END -->"
 $sessionBody = @"
 $sessionStart
 <details open>
-<summary>🧪 <strong>UI Test Category Detection</strong> — <a href="$commitUrl"><code>$commitSha7</code></a> · <strong>$commitTitle</strong> · <em>$timestamp</em></summary>
+<summary>🧪 <a href="$commitUrl"><code>$commitSha7</code></a> · $commitTitle · <em>$timestamp</em></summary>
 
----
+[Build #$BuildId]($BuildUrl) | $headerLine
 
-**Build:** [#$BuildId]($BuildUrl) · $buildBadge
-**Detected categories:** ``$detectedCategories``
+$filterLine
 
-$summaryLine
+$failedSection
 
-#### Stages
+$passedSection
 
-$stageTable
-
-<details>
-<summary>✅ <strong>Jobs that ran ($($ranDecisions.Count))</strong></summary>
-
-$ranTable
-
-</details>
-
-<details>
-<summary>⏭️ <strong>Jobs skipped ($($skippedDecisions.Count))</strong></summary>
-
-$skippedTable
-
-</details>
+$stageSection
 
 </details>
 $sessionEnd
@@ -304,16 +437,12 @@ if ($existingRaw) {
     }
 }
 
-$authorPing = if ($prAuthor) { "> 👋 @$prAuthor — UI test detection summary updated for the latest commit." } else { "" }
-
 if ($existingBody) {
     $merged = Merge-Sessions -ExistingBody $existingBody -NewSession $sessionBody -Sha7 $commitSha7
     $commentBody = @"
 $MARKER
 
-## 🧪 UI Test Category Detection
-
-$authorPing
+## 🧪 UI Test Results
 
 $merged
 "@
@@ -321,9 +450,7 @@ $merged
     $commentBody = @"
 $MARKER
 
-## 🧪 UI Test Category Detection
-
-$authorPing
+## 🧪 UI Test Results
 
 $sessionBody
 "@
