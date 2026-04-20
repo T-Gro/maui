@@ -15,6 +15,7 @@ parameters:
   BuildNativeAOT: false # Parameter to control whether NativeAOT artifacts should be built
   RunNativeAOT: false # Parameter to control whether NativeAOT UI tests should run
   prNumber: ' ' # Optional: PR number for testing category detection from a manual queue
+  categories: ' ' # Optional: comma-separated categories to run (bypasses auto-detection). Empty = all.
   categoryGroupsToTest:
     # Make sure that this list is always up-to-date with src/Controls/tests/TestCases.Shared.Tests/UITestCategories.cs
     # we might want to improve this somehow depending on how much the categories change over time
@@ -74,10 +75,11 @@ stages:
             env:
               SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
               MANUAL_PR_NUMBER: ${{ parameters.prNumber }}
+              MANUAL_CATEGORIES: ${{ parameters.categories }}
             inputs:
               pwsh: true
               filePath: $(System.DefaultWorkingDirectory)/eng/scripts/detect-ui-test-categories.ps1
-              arguments: '-TargetBranch "$env:SYSTEM_PULLREQUEST_TARGETBRANCH" -PrNumber "$env:MANUAL_PR_NUMBER"'
+              arguments: '-TargetBranch "$env:SYSTEM_PULLREQUEST_TARGETBRANCH" -PrNumber "$env:MANUAL_PR_NUMBER" -Categories "$env:MANUAL_CATEGORIES"'
 
   - stage: build_ui_tests
     displayName: Build UITests Sample App

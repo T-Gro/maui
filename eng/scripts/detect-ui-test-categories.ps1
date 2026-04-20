@@ -2,6 +2,7 @@
 param(
     [string]$TargetBranch,
     [string]$PrNumber,
+    [string]$Categories,
     [string]$TestRoot = "src/Controls/tests/TestCases.Shared.Tests"
 )
 
@@ -12,6 +13,13 @@ if (-not [string]::IsNullOrWhiteSpace($PrNumber)) {
     $PrNumber = $null
 }
 
+# Normalize Categories parameter
+if (-not [string]::IsNullOrWhiteSpace($Categories)) {
+    $Categories = $Categories.Trim()
+} else {
+    $Categories = $null
+}
+
 $buildReason = $env:BUILD_REASON
 if ([string]::IsNullOrWhiteSpace($buildReason)) {
     $buildReason = $env:SYSTEM_REASON
@@ -19,8 +27,25 @@ if ([string]::IsNullOrWhiteSpace($buildReason)) {
 
 $isManualPrTest = -not [string]::IsNullOrWhiteSpace($PrNumber)
 
+# When categories are explicitly provided, skip auto-detection entirely.
+# This lets triage/maintainers run specific categories via manual queue.
+if (-not [string]::IsNullOrWhiteSpace($Categories)) {
+    $catList = @($Categories -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    Write-Host "##[section]Categories provided via parameter: $($catList -join ', '). Skipping auto-detection." -ForegroundColor Green
+    $matrix = [ordered]@{}
+    $index = 0
+    foreach ($cat in ($catList | Sort-Object)) {
+        $matrix["Category_$index"] = @{ CATEGORYGROUP = $cat }
+        $index++
+    }
+    $matrixJson = $matrix | ConvertTo-Json -Depth 5
+    Write-Host "##vso[task.setvariable variable=UITestCategoryMatrix;isOutput=true]$matrixJson"
+    Write-Host "##vso[task.setvariable variable=UITestCategoryList;isOutput=true]$($catList -join ',')"
+    return
+}
+
 if ($buildReason -ne 'PullRequest' -and -not $isManualPrTest) {
-    Write-Host "Build reason '$buildReason' is not PullRequest and no -PrNumber override was provided. Skipping category detection." -ForegroundColor Cyan
+    Write-Host "Build reason '$buildReason' is not PullRequest and no -PrNumber override was provided. Running all categories." -ForegroundColor Cyan
     return
 }
 
