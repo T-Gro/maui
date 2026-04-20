@@ -304,8 +304,14 @@ if ($totalFailed -gt 0) {
     $parts += ($typeSummary -join " | ")
     $parts += ""
 
-    # Per-run breakdown with actual test names
-    foreach ($run in ($failedRuns | Sort-Object FailedCount -Descending)) {
+    # Per-run breakdown — cap at 15 runs and 25 tests per run to stay under GitHub comment limit
+    $maxRuns = 15
+    $maxTestsPerRun = 25
+    $sortedFailedRuns = @($failedRuns | Sort-Object FailedCount -Descending)
+    $shownRuns = @($sortedFailedRuns | Select-Object -First $maxRuns)
+    $hiddenRunCount = $sortedFailedRuns.Count - $shownRuns.Count
+
+    foreach ($run in $shownRuns) {
         $runPlatform = $run.Name -replace '^_', '' -replace '_ui_tests_', ' | ' -replace '_controls_', ' | ' -replace '_', ' '
         $passedPct = if ($run.Total -gt 0) { [math]::Round(($run.Passed / $run.Total) * 100, 0) } else { 0 }
 
@@ -316,15 +322,24 @@ if ($totalFailed -gt 0) {
         $parts += "|---|---|---|"
 
         $runFailures = @($allFailures | Where-Object { $_.RunName -eq $run.Name } | Sort-Object Type, TestName)
-        foreach ($f in $runFailures) {
+        $shownTests = @($runFailures | Select-Object -First $maxTestsPerRun)
+        $hiddenTestCount = $runFailures.Count - $shownTests.Count
+        foreach ($f in $shownTests) {
             $icon = Get-FailureIcon -Type $f.Type
             $name = $f.TestName -replace '\|', '\|'
             $det = $f.Detail -replace '\|', '\|' -replace '`', "'"
             if ($det.Length -gt 150) { $det = $det.Substring(0, 150) + "..." }
             $parts += "| $icon | ``$name`` | $det |"
         }
+        if ($hiddenTestCount -gt 0) {
+            $parts += "| | _...and $hiddenTestCount more_ | |"
+        }
         $parts += ""
         $parts += "</details>"
+        $parts += ""
+    }
+    if ($hiddenRunCount -gt 0) {
+        $parts += "_...and $hiddenRunCount more runs with failures (see [build]($BuildUrl))_"
         $parts += ""
     }
 
