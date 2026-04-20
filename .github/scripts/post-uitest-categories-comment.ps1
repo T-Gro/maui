@@ -88,6 +88,39 @@ function Get-FailureIcon {
     }
 }
 
+function Format-RunName {
+    param([string]$Name)
+    # _ios_ui_tests_mono_controls_latest -> iOS Mono (latest)
+    # _android_ui_tests_controls_30 -> Android (API 30)
+    # _winui_ui_tests_controls -> WinUI
+    # _mac_ui_tests_controls -> macOS
+    # Material3_M3_android_ui_tests_controls_36 -> Material3 Android (API 36)
+    # CarouselView_CARV1_ios_ui_tests_mono_controls_latest -> CarouselView iOS Mono (latest)
+    $n = $Name -replace '^_', ''
+    # Extract prefix (CarouselView, CollectionView, Material3, etc.)
+    $prefix = ''
+    if ($n -match '^(CarouselView|CollectionView|Material3)[_]') {
+        $prefix = $Matches[1] + ' '
+        $n = $n -replace '^[^_]+_', ''
+    }
+    # Strip intermediate noise
+    $n = $n -replace 'CARV1_', '' -replace 'CV1_', '' -replace 'M3_', ''
+    # Parse platform
+    $platform = ''
+    if ($n -match 'ios_ui_tests_mono') { $platform = 'iOS Mono' }
+    elseif ($n -match 'android_ui_tests') { $platform = 'Android' }
+    elseif ($n -match 'winui_ui_tests') { $platform = 'WinUI' }
+    elseif ($n -match 'mac_ui_tests') { $platform = 'macOS' }
+    else { return "$prefix$Name" }
+    # Parse version suffix
+    $version = ''
+    if ($n -match '_(\d+_\d+)$') { $version = $Matches[1] -replace '_', '.' }
+    elseif ($n -match '_(\d+)$') { $version = "API $($Matches[1])" }
+    elseif ($n -match '_(latest)$') { $version = $Matches[1] }
+    if ($version) { return "$prefix$platform ($version)" }
+    return "$prefix$platform"
+}
+
 # ============================================================================
 # FETCH BUILD + TIMELINE
 # ============================================================================
@@ -301,8 +334,20 @@ $failedSection = ""
 if ($totalFailed -gt 0) {
     $parts = @()
 
-    # Summary by failure type
-    $parts += "### Failed Tests ($totalFailed)"
+    # Platform summary table
+    $parts += "### Results by Platform"
+    $parts += ""
+    $parts += "| Platform | Passed | Failed | Total |"
+    $parts += "|---|---|---|---|"
+    foreach ($run in ($allRuns | Sort-Object Name)) {
+        $displayName = Format-RunName -Name $run.Name
+        $icon = if ($run.FailedCount -eq 0) { "✅" } else { "❌" }
+        $parts += "| $icon $displayName | $($run.Passed) | $($run.FailedCount) | $($run.Total) |"
+    }
+    $parts += ""
+
+    # Failure breakdown by type
+    $parts += "### Failures ($totalFailed)"
     $parts += ""
     $typeSummary = @($failuresByType | ForEach-Object {
         $icon = Get-FailureIcon -Type $_.Name
@@ -319,11 +364,11 @@ if ($totalFailed -gt 0) {
     $hiddenRunCount = $sortedFailedRuns.Count - $shownRuns.Count
 
     foreach ($run in $shownRuns) {
-        $runPlatform = $run.Name -replace '^_', '' -replace '_ui_tests_', ' | ' -replace '_controls_', ' | ' -replace '_', ' '
+        $displayName = Format-RunName -Name $run.Name
         $passedPct = if ($run.Total -gt 0) { [math]::Round(($run.Passed / $run.Total) * 100, 0) } else { 0 }
 
         $parts += "<details>"
-        $parts += "<summary><strong>$runPlatform</strong> — $($run.FailedCount) failed, $($run.Passed)/$($run.Total) passed ($passedPct%)</summary>"
+        $parts += "<summary>❌ <strong>$displayName</strong> — $($run.FailedCount) failed, $($run.Passed)/$($run.Total) passed ($passedPct%)</summary>"
         $parts += ""
         $parts += "| | Test | Detail |"
         $parts += "|---|---|---|"
@@ -351,26 +396,18 @@ if ($totalFailed -gt 0) {
     }
 
     $failedSection = $parts -join "`n"
-} else {
-    $failedSection = "### All Tests Passed ✅`n`nNo failures detected across $($allRuns.Count) test runs."
-}
-
-# --- Passed runs summary ---
-$passedSection = ""
-if ($passedRuns.Count -gt 0) {
-    $passedLines = @()
-    $passedLines += "<details>"
-    $passedLines += "<summary>✅ <strong>Passed runs ($($passedRuns.Count))</strong> — $(($passedRuns | Measure-Object -Property Total -Sum).Sum) tests</summary>"
-    $passedLines += ""
-    $passedLines += "| Run | Tests |"
-    $passedLines += "|---|---|"
-    foreach ($r in ($passedRuns | Sort-Object Name)) {
-        $name = $r.Name -replace '^_', '' -replace '_ui_tests_', ' | ' -replace '_controls_', ' | ' -replace '_', ' '
-        $passedLines += "| $name | $($r.Total) |"
+} elseif (-not $noneDetected -and $totalTests -gt 0) {
+    $parts = @()
+    $parts += "### Results by Platform"
+    $parts += ""
+    $parts += "| Platform | Passed | Total |"
+    $parts += "|---|---|---|"
+    foreach ($run in ($allRuns | Sort-Object Name)) {
+        $displayName = Format-RunName -Name $run.Name
+        $parts += "| ✅ $displayName | $($run.Passed) | $($run.Total) |"
     }
-    $passedLines += ""
-    $passedLines += "</details>"
-    $passedSection = $passedLines -join "`n"
+    $parts += ""
+    $failedSection = $parts -join "`n"
 }
 
 # --- Failed stages (compact) ---
@@ -401,8 +438,6 @@ $sessionStart
 $filterLine
 
 $failedSection
-
-$passedSection
 
 $stageSection
 
