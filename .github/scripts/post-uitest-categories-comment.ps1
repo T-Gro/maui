@@ -144,7 +144,7 @@ $totalCount = 0
 if ($checkRecords.Count -gt 0) {
     foreach ($rec in $checkRecords) {
         $log = Invoke-RestMethod -Uri "$ApiBase/logs/$($rec.log.id)?api-version=7.1"
-        if ($log -match "Detected Categories:\s*'([^']*)'\s*\(filter engaged:\s*(True|False)\)") {
+        if ($log -match "Detected Categories:\s*'([^']*)'\s*\(filter engaged:\s*(True|False)") {
             $val = $Matches[1]
             $eng = $Matches[2] -eq "True"
             if (-not $val.StartsWith('$(')) {
