@@ -35,11 +35,15 @@ steps:
     $isPR = $env:BUILD_REASON -eq "PullRequest"
     $shouldFilter = $isPR -or $detectedCategoriesSet
 
+    # When detection ran but found NOTHING relevant, UITestCategoryList is set to 'NONE'.
+    # In that case skip ALL jobs — there are no categories to test.
+    $noneDetected = $detectedCategoriesSet -and $detectedCategories -eq 'NONE'
+
     Write-Host "=== Early Category Check ==="
     Write-Host "Build Reason: $env:BUILD_REASON"
     Write-Host "Category Group (from matrix): '$testFilterParam'"
     Write-Host "Test Filter (from parameter): '$testFilterFallback'"
-    Write-Host "Detected Categories: '$detectedCategories' (filter engaged: $shouldFilter)"
+    Write-Host "Detected Categories: '$detectedCategories' (filter engaged: $shouldFilter, none detected: $noneDetected)"
     
     # Use testFilter parameter as fallback when CATEGORYGROUP is not set or not expanded
     # When CATEGORYGROUP variable doesn't exist, it shows as literal '$(CATEGORYGROUP)'
@@ -51,9 +55,15 @@ steps:
     
     $shouldRun = $true
     $matchingCategoriesResult = $testFilterParam  # Default: use all categories from this group
-    
+
+    # NONE means detection ran successfully but no categories matched — skip everything
+    if ($noneDetected) {
+        $shouldRun = $false
+        $matchingCategoriesResult = ""
+        Write-Host "##[warning]No UI test categories detected for this PR — SKIPPING all tests"
+    }
     # For builds with detected categories, check if this category group has any matches
-    if ($shouldFilter -and $detectedCategoriesSet -and -not [string]::IsNullOrWhiteSpace($testFilterParam)) {
+    elseif ($shouldFilter -and $detectedCategoriesSet -and -not [string]::IsNullOrWhiteSpace($testFilterParam)) {
         $categoryList = $testFilterParam -split ","
         $detectedList = $detectedCategories -split ","
         $matchingCategories = @()

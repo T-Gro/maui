@@ -132,7 +132,8 @@ if ([string]::IsNullOrWhiteSpace($mergeBase)) {
 Write-Host "Calculating diff between $mergeBase and HEAD limited to '$TestRoot'..." -ForegroundColor Cyan
 $diff = git diff --diff-filter=AMR --unified=0 $mergeBase HEAD -- "$TestRoot"
 if ([string]::IsNullOrWhiteSpace($diff)) {
-    Write-Host "No changes detected under '$TestRoot'. Falling back to default category matrix." -ForegroundColor Cyan
+    Write-Host "No changes detected under '$TestRoot'. No UI test categories to run." -ForegroundColor Cyan
+    Write-Host "##vso[task.setvariable variable=UITestCategoryList;isOutput=true]NONE"
     return
 }
 
@@ -170,7 +171,8 @@ foreach ($line in $diff -split "`n") {
 }
 
 if ($addedCategories.Count -eq 0) {
-    Write-Host "No new Category attributes detected in diff. Using default category matrix." -ForegroundColor Cyan
+    Write-Host "No new Category attributes detected in diff. No UI test categories to run." -ForegroundColor Cyan
+    Write-Host "##vso[task.setvariable variable=UITestCategoryList;isOutput=true]NONE"
     return
 }
 
