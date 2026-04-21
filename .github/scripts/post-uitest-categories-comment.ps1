@@ -467,6 +467,8 @@ function Merge-Sessions {
     $first = $true
     foreach ($k in $orderedKeys) {
         $b = $sessions[$k]
+        # Ensure <br> after every </summary> (normalize old sessions)
+        $b = $b -replace '</summary>\s*(?!<br>)', "</summary>`n<br>"
         if ($first) {
             $b = $b -replace '<details(?:\s+open)?>', '<details open>'
             $first = $false
