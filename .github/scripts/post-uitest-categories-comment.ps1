@@ -321,7 +321,9 @@ if ($noneDetected -and $totalTests -eq 0) {
 }
 
 # Filter info line
-$filterLine = if ($filterEngaged) {
+$filterLine = if ($noneDetected) {
+    "⏭️ No UI test categories detected — skipped $skippedCount of $totalCount matrix cells"
+} elseif ($filterEngaged) {
     "🎯 **Detected categories:** ``$detectedCategories`` — ran $ranCount of $totalCount matrix cells (skipped $skippedCount)"
 } else {
     "📦 **Full matrix** — all $totalCount matrix cells ran"

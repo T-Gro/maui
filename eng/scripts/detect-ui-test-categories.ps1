@@ -214,9 +214,37 @@ foreach ($line in $diff -split "`n") {
 }
 
 if ($addedCategories.Count -eq 0) {
-    Write-Host "No new Category attributes detected in diff. No UI test categories to run." -ForegroundColor Cyan
-    Write-Host "##vso[task.setvariable variable=UITestCategoryList;isOutput=true]NONE"
-    return
+    # No new [Category] in the diff — but the PR modifies test files.
+    # Scan the modified files themselves for existing [Category] attributes.
+    Write-Host "No new Category attributes in diff. Scanning modified files for existing categories..." -ForegroundColor Cyan
+    $modifiedFiles = @(git diff --diff-filter=AMR --name-only $mergeBase HEAD -- "$TestRoot" | Where-Object { $_ -match '\.cs$' })
+    foreach ($file in $modifiedFiles) {
+        if (-not (Test-Path $file)) { continue }
+        $content = Get-Content $file -Raw
+        $fileMatches = [regex]::Matches($content, '\[Category\(([^\)]*)\)\]')
+        foreach ($m in $fileMatches) {
+            $rawValue = $m.Groups[1].Value.Trim()
+            if ([string]::IsNullOrWhiteSpace($rawValue)) { continue }
+            if ($rawValue -match '^UITestCategories\.(?<name>[A-Za-z0-9_]+)$') {
+                $cat = $Matches['name']
+            } elseif ($rawValue -match '^["''](?<name>[A-Za-z0-9_ -]+)["'']$') {
+                $cat = $Matches['name']
+            } elseif ($rawValue -match 'nameof\(UITestCategories\.(?<name>[A-Za-z0-9_]+)\)') {
+                $cat = $Matches['name']
+            } else { continue }
+            $cat = $cat.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($cat)) {
+                $addedCategories.Add($cat) | Out-Null
+            }
+        }
+    }
+    if ($addedCategories.Count -gt 0) {
+        Write-Host "Found existing categories in modified files: $([string]::Join(', ', $addedCategories))" -ForegroundColor Green
+    } else {
+        Write-Host "No categories found in modified files either. No UI test categories to run." -ForegroundColor Cyan
+        Write-Host "##vso[task.setvariable variable=UITestCategoryList;isOutput=true]NONE"
+        return
+    }
 }
 
 Write-Host "Detected categories from PR changes: $([string]::Join(', ', $addedCategories))" -ForegroundColor Green
