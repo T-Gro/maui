@@ -369,6 +369,7 @@ if ($totalFailed -gt 0) {
 
         $parts += "<details>"
         $parts += "<summary>❌ <strong>$displayName</strong> — $($run.FailedCount) failed, $($run.Passed)/$($run.Total) passed ($passedPct%)</summary>"
+        $parts += "<br>"
         $parts += ""
         $parts += "| | Test | Detail |"
         $parts += "|---|---|---|"
@@ -416,6 +417,7 @@ if ($failedStages.Count -gt 0) {
     $stageLines = @()
     $stageLines += "<details>"
     $stageLines += "<summary>🔴 <strong>Failed stages ($($failedStages.Count))</strong> of $($stages.Count) total</summary>"
+    $stageLines += "<br>"
     $stageLines += ""
     foreach ($s in $failedStages) {
         $stageLines += "- ❌ $($s.name)"
@@ -432,6 +434,7 @@ $sessionBody = @"
 $sessionStart
 <details open>
 <summary>🧪 <a href="$commitUrl"><code>$commitSha7</code></a> · $commitTitle · <em>$timestamp</em></summary>
+<br>
 
 [Build #$BuildId]($BuildUrl) | $headerLine
 
