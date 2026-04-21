@@ -74,13 +74,31 @@ function Get-GitHubHeaders {
     return $h
 }
 
+# Helper: invoke a REST call with retries for transient failures.
+function Invoke-WithRetry {
+    param([string]$Uri, [hashtable]$Headers, [int]$MaxRetries = 3, [int]$DelaySeconds = 10)
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            return Invoke-RestMethod -Uri $Uri -Headers $Headers -Method Get -TimeoutSec 30
+        } catch {
+            Write-Host "##[warning]Attempt $attempt/$MaxRetries failed: $($_.Exception.Message)"
+            if ($attempt -lt $MaxRetries) {
+                Write-Host "Retrying in ${DelaySeconds}s..."
+                Start-Sleep -Seconds $DelaySeconds
+            } else {
+                throw
+            }
+        }
+    }
+}
+
 # Manual-test override: when -PrNumber is provided, fetch the PR's base/head from GitHub
 # and replay the same diff that a normal PR build would see.
 if ($isManualPrTest) {
     try {
         $prUrl = "https://api.github.com/repos/$repoName/pulls/$PrNumber"
         Write-Host "##[section]Manual PR test mode (PrNumber=$PrNumber). Fetching PR metadata from $prUrl" -ForegroundColor Yellow
-        $pr = Invoke-RestMethod -Uri $prUrl -Headers (Get-GitHubHeaders) -Method Get -TimeoutSec 30
+        $pr = Invoke-WithRetry -Uri $prUrl -Headers (Get-GitHubHeaders)
         $TargetBranch = $pr.base.ref
         $headRef = $pr.head.ref
         $headSha = $pr.head.sha
@@ -110,7 +128,7 @@ if (-not [string]::IsNullOrWhiteSpace($prNumberForLookup)) {
     try {
         $labelsUrl = "https://api.github.com/repos/$repoName/issues/$prNumberForLookup/labels"
         Write-Host "Checking PR labels at $labelsUrl" -ForegroundColor Cyan
-        $labels = Invoke-RestMethod -Uri $labelsUrl -Headers (Get-GitHubHeaders) -Method Get -TimeoutSec 30
+        $labels = Invoke-WithRetry -Uri $labelsUrl -Headers (Get-GitHubHeaders)
         $labelNames = @($labels | ForEach-Object { $_.name })
         Write-Host "PR labels: $([string]::Join(', ', $labelNames))" -ForegroundColor Cyan
         if ($labelNames -contains 'run-all-uitests') {
