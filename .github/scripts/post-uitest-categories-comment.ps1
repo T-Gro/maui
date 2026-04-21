@@ -313,17 +313,15 @@ $buildBadge = switch ($build.result) {
 $passRate = if ($totalTests -gt 0) { [math]::Round(($totalPassed / $totalTests) * 100, 1) } else { 0 }
 
 # Header line with key stats
-if ($noneDetected) {
-    $headerLine = "⏭️ **No UI test categories detected** — tests skipped"
+if ($noneDetected -and $totalTests -eq 0) {
+    $headerLine = "**$buildBadge** | No UI test categories detected"
 } else {
     $headerLine = "**$buildBadge** | $totalPassed/$totalTests passed ($passRate%)"
     if ($totalFailed -gt 0) { $headerLine += " | **$totalFailed failed**" }
 }
 
 # Filter info line
-$filterLine = if ($noneDetected) {
-    "This PR does not add or modify UI test files under ``src/Controls/tests/TestCases.Shared.Tests``, so no UI test categories were detected. All test jobs were skipped.`n`nIf you believe UI tests should run for this PR, add the ``run-all-uitests`` label and re-queue."
-} elseif ($filterEngaged) {
+$filterLine = if ($filterEngaged) {
     "🎯 **Detected categories:** ``$detectedCategories`` — ran $ranCount of $totalCount matrix cells (skipped $skippedCount)"
 } else {
     "📦 **Full matrix** — all $totalCount matrix cells ran"
